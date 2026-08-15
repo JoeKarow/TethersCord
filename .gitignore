@@ -1,0 +1,25 @@
+# Node
+node_modules/
+pnpm-lock.yaml
+yarn.lock
+package-lock.json
+
+# Build artifacts
+dist/
+build/
+.cache/
+.tmp/
+
+# Vite
+client/.vite/
+
+# Elm
+client/elm-stuff/
+
+# Worker build
+worker/dist/
+
+# Env
+.env
+.env.local
+.env.*.local

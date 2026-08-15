@@ -1,0 +1,24 @@
+name = "tetherscord"
+main = "src/index.ts"
+compatibility_date = "2024-04-05"
+
+# This assumes you're deploying the Worker separately from Pages.
+# If you later bind this as a Pages Function, you'll adjust accordingly.
+
+[vars]
+DISCORD_REDIRECT_URI = "https://your-worker-domain.com/api/oauth/discord/exchange"
+DISCORD_CLIENT_ID = "YOUR_DISCORD_CLIENT_ID"
+
+# DISCORD_CLIENT_SECRET should be set via wrangler secrets, not plain vars.
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ttrpg-activity-db"
+database_id = "YOUR_D1_DATABASE_ID"
+
+[[durable_objects.bindings]]
+name = "GAME_TABLE"
+class_name = "GameTable"
+
+[build]
+command = "npm run build" # or "npx esbuild src/index.ts --bundle --outfile=dist/index.js"
