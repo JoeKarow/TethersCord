@@ -2,8 +2,7 @@ name = "tetherscord"
 main = "src/index.ts"
 compatibility_date = "2024-04-05"
 
-# This assumes you're deploying the Worker separately from Pages.
-# If you later bind this as a Pages Function, you'll adjust accordingly.
+# Deploying the Worker separately from Pages.
 
 [vars]
 DISCORD_REDIRECT_URI = "https://your-worker-domain.com/api/oauth/discord/exchange"

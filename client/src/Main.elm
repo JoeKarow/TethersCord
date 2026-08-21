@@ -133,17 +133,6 @@ decodeRole =
             )
 
 
-encodeRole : Role -> Encode.Value
-encodeRole role =
-    Encode.string <|
-        case role of
-            Facilitator ->
-                "facilitator"
-
-            Player ->
-                "player"
-
-
 decodeAuth : Decode.Decoder Auth
 decodeAuth =
     Decode.map4 Auth

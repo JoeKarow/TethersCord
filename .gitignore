@@ -23,3 +23,7 @@ worker/dist/
 .env
 .env.local
 .env.*.local
+worker/.dev.vars
+worker/.env
+worker/.env.*
+!worker/.env.example
