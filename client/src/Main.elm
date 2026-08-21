@@ -10,6 +10,7 @@ import Json.Encode as Encode
 import Time
 
 
+
 -- FLAGS
 
 
@@ -17,6 +18,7 @@ type alias Flags =
     { apiBaseUrl : String
     , tableId : String
     }
+
 
 
 -- MODEL
@@ -72,6 +74,7 @@ init flags =
     )
 
 
+
 -- MESSAGES
 
 
@@ -83,6 +86,7 @@ type Msg
     | MessagePosted (Result Http.Error GameState)
     | FromDiscordRaw Decode.Value
     | NoOp
+
 
 
 -- PORTS
@@ -106,6 +110,7 @@ authorizeCmd scopes =
 subscriptions : Model -> Sub Msg
 subscriptions _ =
     fromDiscord FromDiscordRaw
+
 
 
 -- DECODERS / ENCODERS
@@ -181,6 +186,7 @@ decodeFromDiscord =
             )
 
 
+
 -- UPDATE
 
 
@@ -245,6 +251,7 @@ update msg model =
             ( model, Cmd.none )
 
 
+
 -- HTTP HELPERS
 
 
@@ -306,6 +313,7 @@ postMessageCmd flags auth content =
         }
 
 
+
 -- VIEW
 
 
@@ -335,8 +343,8 @@ viewMessage msg =
     let
         roleLabel =
             case msg.role of
-                DungeonMaster ->
-                    "[DM] "
+                Facilitator ->
+                    "Facilitator"
 
                 Player ->
                     ""
@@ -362,6 +370,7 @@ viewComposer model =
                     []
                 , button [ onClick SendMessage ] [ text "Send" ]
                 ]
+
 
 
 -- PROGRAM

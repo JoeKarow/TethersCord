@@ -1,6 +1,9 @@
 // client/src/DiscordBridge.ts
 
-import { DiscordSDK } from "@discord/embedded-app-sdk";
+import { DiscordSDK, type Types } from "@discord/embedded-app-sdk";
+import type { BackendAuthResult } from "../../worker/src/types";
+
+type OAuthScopes = Types.OAuthScopes;
 
 type ElmPorts = {
   toDiscord: {
@@ -18,7 +21,10 @@ export async function initDiscordBridge(
 ): Promise<void> {
   ports.toDiscord.subscribe(async (msg: any) => {
     if (msg.type === "Authorize") {
-      const scopes = (msg.scopes as string[]) ?? ["identify"];
+      // Elm sends strings, we trust they are valid scopes and cast:
+      const scopes = ((msg.scopes as string[]) ?? [
+        "identify",
+      ]) as OAuthScopes[];
 
       try {
         const authCode = await runDiscordAuthorize(discordSdk, scopes);
@@ -40,40 +46,31 @@ export async function initDiscordBridge(
 
 async function runDiscordAuthorize(
   discordSdk: DiscordSDK,
-  scopes: string[],
+  scopes: OAuthScopes[],
 ): Promise<string> {
   const response = await discordSdk.commands.authorize({
     client_id: (window as any).DISCORD_CLIENT_ID,
     response_type: "code",
-    scope: scopes.join(" "),
+    scope: scopes,
     prompt: "none",
   });
 
   return response.code;
 }
 
-type BackendAuthResult = {
-  userId: string;
-  username: string;
-  role: "dm" | "player";
-  sessionToken: string;
-};
-
 async function exchangeCodeWithBackend(
   backendBaseUrl: string,
   code: string,
 ): Promise<BackendAuthResult> {
-  const res = await fetch(`${backendBaseUrl}/api/oauth/discord/exchange`, {
+  const response = await fetch(`${backendBaseUrl}/api/oauth/discord/exchange`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ code }),
   });
 
-  if (!res.ok) {
-    throw new Error(`Backend auth failed: ${res.status}`);
+  if (!response.ok) {
+    throw new Error(`Backend auth exchange failed: ${await response.text()}`);
   }
 
-  return res.json();
+  return (await response.json()) as BackendAuthResult;
 }
