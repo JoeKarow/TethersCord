@@ -44,6 +44,14 @@ export async function initDiscordBridge(
   });
 }
 
+function apiUrl(backendBaseUrl: string, path: string): string {
+  if (!backendBaseUrl || backendBaseUrl === window.location.origin) {
+    return path;
+  }
+
+  return `${backendBaseUrl}${path}`;
+}
+
 async function runDiscordAuthorize(
   discordSdk: DiscordSDK,
   scopes: OAuthScopes[],
@@ -62,11 +70,14 @@ async function exchangeCodeWithBackend(
   backendBaseUrl: string,
   code: string,
 ): Promise<BackendAuthResult> {
-  const response = await fetch(`${backendBaseUrl}/api/oauth/discord/exchange`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ code }),
-  });
+  const response = await fetch(
+    apiUrl(backendBaseUrl, "/api/oauth/discord/exchange"),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    },
+  );
 
   if (!response.ok) {
     throw new Error(`Backend auth exchange failed: ${await response.text()}`);
