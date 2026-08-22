@@ -93,7 +93,7 @@ export async function handleDiscordExchange(
 async function inferRoleFromDb(env: Env, discordUserId: string): Promise<Role> {
   const dmRow = await env.DB.prepare(
     `
-    SELECT 1 FROM dungeon_masters
+    SELECT 1 FROM facilitators
     WHERE discord_user_id = ?
     LIMIT 1
   `,

@@ -155,7 +155,7 @@ async function getAuthFromRequest(
     `
     SELECT s.discord_user_id, dm.discord_user_id AS dm_id
     FROM sessions_auth s
-    LEFT JOIN dungeon_masters dm ON dm.discord_user_id = s.discord_user_id
+    LEFT JOIN facilitators dm ON dm.discord_user_id = s.discord_user_id
     WHERE s.session_token = ?
     LIMIT 1
   `,

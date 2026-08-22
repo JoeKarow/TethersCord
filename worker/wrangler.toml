@@ -19,6 +19,7 @@ DISCORD_CLIENT_ID = "1540421919982231692"
 binding = "DB"
 database_name = "ttrpg-activity-db"
 database_id = "8cef44a0-b184-45b2-af0b-820d803b2fc0"
+migrations_dir = "./migratons"
 
 [[durable_objects.bindings]]
 name = "GAME_TABLE"
