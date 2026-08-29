@@ -4,7 +4,22 @@ import type {
   DurableObject,
   DurableObjectState,
 } from "@cloudflare/workers-types";
-import type { Env, GameState, Message, PostMessageInput, Role } from "./types";
+import type {
+  Env,
+  GameState,
+  Message,
+  PendingRoll,
+  PostMessageInput,
+  Role,
+  StoneKind,
+} from "./types";
+
+const INITIAL_STONE_POOL: StoneKind[] = [
+  "WhiteStone",
+  "BlackStone",
+  "WhiteStone",
+  "BlackStone",
+];
 
 export class GameTable implements DurableObject {
   private state: DurableObjectState;
@@ -33,6 +48,22 @@ export class GameTable implements DurableObject {
       return this.handlePostMessage(request);
     }
 
+    if (url.pathname === "/stones/add-white" && request.method === "POST") {
+      return this.handleAddWhiteStone(request);
+    }
+
+    if (url.pathname === "/stones/roll" && request.method === "POST") {
+      return this.handleRoll(request, "Rolled");
+    }
+
+    if (url.pathname === "/stones/reroll" && request.method === "POST") {
+      return this.handleRoll(request, "Rerolled");
+    }
+
+    if (url.pathname === "/stones/accept" && request.method === "POST") {
+      return this.handleAcceptRoll(request);
+    }
+
     return new Response("Not found", { status: 404 });
   }
 
@@ -51,7 +82,14 @@ export class GameTable implements DurableObject {
 
     const messages = rows.results ? [...rows.results].reverse() : [];
 
-    return { sessionId, messages };
+    // The stone pool and pending roll are shared, in-memory session state:
+    // not persisted to D1, they reset if the Durable Object restarts.
+    return {
+      sessionId,
+      messages,
+      stonePool: INITIAL_STONE_POOL,
+      pendingRoll: null,
+    };
   }
 
   private async handleGetMessages(): Promise<Response> {
@@ -66,8 +104,7 @@ export class GameTable implements DurableObject {
 
     const inputRaw = (await request.json()) as PostMessageInput;
 
-    const prev = this.gameState!;
-    const next = addMessage(prev, {
+    const next = await this.appendMessage(this.gameState!, {
       authorId: authInfo.discordUserId,
       authorName: authInfo.username,
       role: authInfo.role,
@@ -76,6 +113,70 @@ export class GameTable implements DurableObject {
 
     this.gameState = next;
 
+    return jsonResponse(next);
+  }
+
+  private async handleAddWhiteStone(request: Request): Promise<Response> {
+    const authInfo = await getAuthFromRequest(this.env, request);
+    if (!authInfo) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+
+    this.gameState = {
+      ...this.gameState!,
+      stonePool: [...this.gameState!.stonePool, "WhiteStone"],
+    };
+
+    return jsonResponse(this.gameState);
+  }
+
+  private async handleRoll(
+    request: Request,
+    verb: "Rolled" | "Rerolled",
+  ): Promise<Response> {
+    const authInfo = await getAuthFromRequest(this.env, request);
+    if (!authInfo) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+
+    const prev = this.gameState!;
+    const pendingRoll = pickTwoRandom(prev.stonePool);
+
+    const next = await this.appendMessage(
+      { ...prev, pendingRoll },
+      {
+        authorId: authInfo.discordUserId,
+        authorName: authInfo.username,
+        role: authInfo.role,
+        content: `${verb}: ${describeStones(pendingRoll.chosen)}`,
+      },
+    );
+
+    this.gameState = next;
+
+    return jsonResponse(next);
+  }
+
+  private async handleAcceptRoll(request: Request): Promise<Response> {
+    const authInfo = await getAuthFromRequest(this.env, request);
+    if (!authInfo) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+
+    this.gameState = {
+      ...this.gameState!,
+      stonePool: INITIAL_STONE_POOL,
+      pendingRoll: null,
+    };
+
+    return jsonResponse(this.gameState);
+  }
+
+  private async appendMessage(
+    state: GameState,
+    input: AddMessageInput,
+  ): Promise<GameState> {
+    const next = addMessage(state, input);
     const msg = next.messages[next.messages.length - 1];
 
     await this.env.DB.prepare(
@@ -95,7 +196,7 @@ export class GameTable implements DurableObject {
       )
       .run();
 
-    return jsonResponse(next);
+    return next;
   }
 }
 
@@ -133,6 +234,39 @@ function addMessage(state: GameState, input: AddMessageInput): GameState {
   return { ...state, messages: cappedMessages };
 }
 
+function pickTwoRandom(pool: StoneKind[]): PendingRoll {
+  const indices = pool.map((_, i) => i);
+
+  for (let i = indices.length - 1; i > 0; i--) {
+    const j = randomInt(i + 1);
+    [indices[i], indices[j]] = [indices[j], indices[i]];
+  }
+
+  const chosenIndices = new Set(indices.slice(0, Math.min(2, indices.length)));
+  const chosen: StoneKind[] = [];
+  const rest: StoneKind[] = [];
+
+  pool.forEach((stone, i) => {
+    if (chosenIndices.has(i)) {
+      chosen.push(stone);
+    } else {
+      rest.push(stone);
+    }
+  });
+
+  return { chosen, rest };
+}
+
+function randomInt(maxExclusive: number): number {
+  const buf = new Uint32Array(1);
+  crypto.getRandomValues(buf);
+  return buf[0] % maxExclusive;
+}
+
+function describeStones(stones: StoneKind[]): string {
+  return stones.map((s) => (s === "WhiteStone" ? "White" : "Black")).join(", ");
+}
+
 type AuthInfo = {
   discordUserId: string;
   username: string;
@@ -153,7 +287,7 @@ async function getAuthFromRequest(
 
   const row = await env.DB.prepare(
     `
-    SELECT s.discord_user_id, dm.discord_user_id AS dm_id
+    SELECT s.discord_user_id, s.discord_username, dm.discord_user_id AS dm_id
     FROM sessions_auth s
     LEFT JOIN facilitators dm ON dm.discord_user_id = s.discord_user_id
     WHERE s.session_token = ?
@@ -161,18 +295,19 @@ async function getAuthFromRequest(
   `,
   )
     .bind(token)
-    .first<{ discord_user_id: string; dm_id: string | null } | null>();
+    .first<{
+      discord_user_id: string;
+      discord_username: string;
+      dm_id: string | null;
+    } | null>();
 
   if (!row) return null;
 
   const role: Role = row.dm_id ? "facilitator" : "player";
 
-  // For now, we don’t store username in sessions_auth; frontend keeps it separately.
-  const username = ""; // can be enriched later if desired
-
   return {
     discordUserId: row.discord_user_id,
-    username,
+    username: row.discord_username,
     role,
   };
 }

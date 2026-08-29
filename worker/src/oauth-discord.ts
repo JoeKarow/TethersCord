@@ -70,11 +70,11 @@ export async function handleDiscordExchange(
 
   await env.DB.prepare(
     `
-    INSERT INTO sessions_auth (session_token, discord_user_id, created_at)
-    VALUES (?, ?, ?)
+    INSERT INTO sessions_auth (session_token, discord_user_id, discord_username, created_at)
+    VALUES (?, ?, ?, ?)
   `,
   )
-    .bind(sessionToken, user.id, Date.now())
+    .bind(sessionToken, user.id, username, Date.now())
     .run();
 
   const result: BackendAuthResult = {

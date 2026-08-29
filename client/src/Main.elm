@@ -7,6 +7,7 @@ import Html.Events exposing (onClick, onInput)
 import Http
 import Json.Decode as Decode
 import Json.Encode as Encode
+import Roll exposing (Stone(..))
 import Time
 
 
@@ -47,9 +48,17 @@ type alias Message =
     }
 
 
+type alias PendingRoll =
+    { chosen : List Stone
+    , rest : List Stone
+    }
+
+
 type alias GameState =
     { sessionId : String
     , messages : List Message
+    , stonePool : List Stone
+    , pendingRoll : Maybe PendingRoll
     }
 
 
@@ -85,6 +94,12 @@ type Msg
     | SendMessage
     | MessagePosted (Result Http.Error GameState)
     | FromDiscordRaw Decode.Value
+    | AddWhiteStone
+    | RollStones
+    | RerollStones
+    | AcceptRoll
+    | StonesUpdated (Result Http.Error GameState)
+    | PollTick
     | NoOp
 
 
@@ -109,7 +124,10 @@ authorizeCmd scopes =
 
 subscriptions : Model -> Sub Msg
 subscriptions _ =
-    fromDiscord FromDiscordRaw
+    Sub.batch
+        [ fromDiscord FromDiscordRaw
+        , Time.every 2000 (\_ -> PollTick)
+        ]
 
 
 
@@ -153,11 +171,35 @@ decodeMessage =
         (Decode.field "createdAt" (Decode.map Time.millisToPosix Decode.int))
 
 
+decodeStoneList : Decode.Decoder (List Stone)
+decodeStoneList =
+    Decode.list Decode.string
+        |> Decode.map
+            (List.map
+                (\s ->
+                    if s == "WhiteStone" then
+                        WhiteStone
+
+                    else
+                        BlackStone
+                )
+            )
+
+
+decodePendingRoll : Decode.Decoder PendingRoll
+decodePendingRoll =
+    Decode.map2 PendingRoll
+        (Decode.field "chosen" decodeStoneList)
+        (Decode.field "rest" decodeStoneList)
+
+
 decodeGameState : Decode.Decoder GameState
 decodeGameState =
-    Decode.map2 GameState
+    Decode.map4 GameState
         (Decode.field "sessionId" Decode.string)
         (Decode.field "messages" (Decode.list decodeMessage))
+        (Decode.field "stonePool" decodeStoneList)
+        (Decode.field "pendingRoll" (Decode.nullable decodePendingRoll))
 
 
 decodeFromDiscord : Decode.Decoder Msg
@@ -236,6 +278,32 @@ update msg model =
         MessagePosted (Err _) ->
             ( { model | status = "Failed to post message." }, Cmd.none )
 
+        AddWhiteStone ->
+            ( model, postStonesCmd model.flags model.auth "/stones/add-white" )
+
+        RollStones ->
+            ( model, postStonesCmd model.flags model.auth "/stones/roll" )
+
+        RerollStones ->
+            ( model, postStonesCmd model.flags model.auth "/stones/reroll" )
+
+        AcceptRoll ->
+            ( model, postStonesCmd model.flags model.auth "/stones/accept" )
+
+        StonesUpdated (Ok gs) ->
+            ( { model | gameState = Just gs }, Cmd.none )
+
+        StonesUpdated (Err _) ->
+            ( { model | status = "Failed to update stones." }, Cmd.none )
+
+        PollTick ->
+            case model.auth of
+                Just auth ->
+                    ( model, getGameStateCmd model.flags auth )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
         NoOp ->
             ( model, Cmd.none )
 
@@ -302,6 +370,34 @@ postMessageCmd flags auth content =
         }
 
 
+postStonesCmd : Flags -> Maybe Auth -> String -> Cmd Msg
+postStonesCmd flags maybeAuth path =
+    case maybeAuth of
+        Nothing ->
+            Cmd.none
+
+        Just auth ->
+            let
+                url =
+                    backendBaseUrl flags
+                        ++ "/api/table/"
+                        ++ flags.tableId
+                        ++ path
+                        ++ "?sessionId="
+                        ++ flags.tableId
+            in
+            Http.request
+                { method = "POST"
+                , headers =
+                    [ Http.header "Authorization" ("Bearer " ++ auth.sessionToken) ]
+                , url = url
+                , body = Http.emptyBody
+                , expect = Http.expectJson StonesUpdated decodeGameState
+                , timeout = Nothing
+                , tracker = Nothing
+                }
+
+
 
 -- VIEW
 
@@ -311,9 +407,49 @@ view model =
     div [ class "board-root" ]
         [ h1 [] [ text "TTRPG Shared Board" ]
         , div [] [ text model.status ]
+        , viewRollState model.gameState
         , viewMessages model
         , viewComposer model
         ]
+
+
+viewStoneList : List Stone -> Html Msg
+viewStoneList stones =
+    ul [ class "stone-list" ]
+        (List.map (\stone -> li [] [ text (Roll.stoneLabel stone) ]) stones)
+
+
+viewRollState : Maybe GameState -> Html Msg
+viewRollState maybeGameState =
+    case maybeGameState of
+        Nothing ->
+            div [ class "roll-panel" ] [ text "Loading stone pool..." ]
+
+        Just gs ->
+            div [ class "roll-panel" ]
+                [ div []
+                    [ text "Initial stones: "
+                    , viewStoneList Roll.initialStones
+                    ]
+                , div []
+                    [ text ("Current pool (" ++ String.fromInt (List.length gs.stonePool) ++ "): ")
+                    , viewStoneList gs.stonePool
+                    ]
+                , button [ onClick AddWhiteStone ] [ text "Add White Stone" ]
+                , case gs.pendingRoll of
+                    Nothing ->
+                        button [ onClick RollStones ] [ text "Roll" ]
+
+                    Just pending ->
+                        div [ class "roll-result" ]
+                            [ div []
+                                [ text "Rolled: "
+                                , viewStoneList pending.chosen
+                                ]
+                            , button [ onClick RerollStones ] [ text "Reroll" ]
+                            , button [ onClick AcceptRoll ] [ text "Accept" ]
+                            ]
+                ]
 
 
 viewMessages : Model -> Html Msg

@@ -17,9 +17,18 @@ export type Message = {
   createdAt: number;
 };
 
+export type StoneKind = "WhiteStone" | "BlackStone";
+
+export type PendingRoll = {
+  chosen: StoneKind[];
+  rest: StoneKind[];
+};
+
 export type GameState = {
   sessionId: string;
   messages: Message[];
+  stonePool: StoneKind[];
+  pendingRoll: PendingRoll | null;
 };
 
 export type PostMessageInput = {
