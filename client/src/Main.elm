@@ -3,7 +3,7 @@ port module Main exposing (main)
 import Browser
 import Html exposing (Html, button, div, h1, input, li, text, ul)
 import Html.Attributes exposing (..)
-import Html.Events exposing (onClick, onInput)
+import Html.Events exposing (onBlur, onClick, onInput)
 import Http
 import Json.Decode as Decode
 import Json.Encode as Encode
@@ -54,11 +54,61 @@ type alias PendingRoll =
     }
 
 
+type alias CharacterSheet =
+    { id : String
+    , slot : Int
+    , name : String
+    , notableFeatures : String
+    , archetype : String
+    , desire : String
+    , quest : String
+    , condition : String
+    , notes : String
+    , fate : Int
+    }
+
+
+type CharacterField
+    = NameField
+    | NotableFeaturesField
+    | ArchetypeField
+    | DesireField
+    | QuestField
+    | ConditionField
+    | NotesField
+
+
+setCharacterField : CharacterField -> String -> CharacterSheet -> CharacterSheet
+setCharacterField field value character =
+    case field of
+        NameField ->
+            { character | name = value }
+
+        NotableFeaturesField ->
+            { character | notableFeatures = value }
+
+        ArchetypeField ->
+            { character | archetype = value }
+
+        DesireField ->
+            { character | desire = value }
+
+        QuestField ->
+            { character | quest = value }
+
+        ConditionField ->
+            { character | condition = value }
+
+        NotesField ->
+            { character | notes = value }
+
+
 type alias GameState =
     { sessionId : String
     , messages : List Message
     , stonePool : List Stone
     , pendingRoll : Maybe PendingRoll
+    , characters : List CharacterSheet
     }
 
 
@@ -99,6 +149,11 @@ type Msg
     | RerollStones
     | AcceptRoll
     | StonesUpdated (Result Http.Error GameState)
+    | CharacterFieldInput Int CharacterField String
+    | CharacterFieldBlur Int
+    | FateIncrement Int
+    | FateDecrement Int
+    | CharacterUpdated (Result Http.Error GameState)
     | WsGameStateRaw Decode.Value
     | NoOp
 
@@ -196,13 +251,47 @@ decodePendingRoll =
         (Decode.field "rest" decodeStoneList)
 
 
+decodeCharacterSheet : Decode.Decoder CharacterSheet
+decodeCharacterSheet =
+    Decode.map8
+        (\id slot name notableFeatures archetype desire quest condition ->
+            \notes fate ->
+                { id = id
+                , slot = slot
+                , name = name
+                , notableFeatures = notableFeatures
+                , archetype = archetype
+                , desire = desire
+                , quest = quest
+                , condition = condition
+                , notes = notes
+                , fate = fate
+                }
+        )
+        (Decode.field "id" Decode.string)
+        (Decode.field "slot" Decode.int)
+        (Decode.field "name" Decode.string)
+        (Decode.field "notableFeatures" Decode.string)
+        (Decode.field "archetype" Decode.string)
+        (Decode.field "desire" Decode.string)
+        (Decode.field "quest" Decode.string)
+        (Decode.field "condition" Decode.string)
+        |> Decode.andThen
+            (\toSheet ->
+                Decode.map2 toSheet
+                    (Decode.field "notes" Decode.string)
+                    (Decode.field "fate" Decode.int)
+            )
+
+
 decodeGameState : Decode.Decoder GameState
 decodeGameState =
-    Decode.map4 GameState
+    Decode.map5 GameState
         (Decode.field "sessionId" Decode.string)
         (Decode.field "messages" (Decode.list decodeMessage))
         (Decode.field "stonePool" decodeStoneList)
         (Decode.field "pendingRoll" (Decode.nullable decodePendingRoll))
+        (Decode.field "characters" (Decode.list decodeCharacterSheet))
 
 
 decodeFromDiscord : Decode.Decoder Msg
@@ -299,6 +388,34 @@ update msg model =
         StonesUpdated (Err _) ->
             ( { model | status = "Failed to update stones." }, Cmd.none )
 
+        CharacterFieldInput slot field value ->
+            ( { model
+                | gameState =
+                    Maybe.map (mapCharacterAtSlot slot (setCharacterField field value)) model.gameState
+              }
+            , Cmd.none
+            )
+
+        CharacterFieldBlur slot ->
+            case ( model.auth, model.gameState |> Maybe.andThen (findCharacterAtSlot slot) ) of
+                ( Just auth, Just character ) ->
+                    ( model, postCharacterUpdateCmd model.flags auth slot character )
+
+                _ ->
+                    ( model, Cmd.none )
+
+        FateIncrement slot ->
+            ( model, postFateCmd model.flags model.auth slot 1 )
+
+        FateDecrement slot ->
+            ( model, postFateCmd model.flags model.auth slot -1 )
+
+        CharacterUpdated (Ok gs) ->
+            ( { model | gameState = Just gs }, Cmd.none )
+
+        CharacterUpdated (Err _) ->
+            ( { model | status = "Failed to update character sheet." }, Cmd.none )
+
         WsGameStateRaw value ->
             case Decode.decodeValue decodeGameState value of
                 Ok gs ->
@@ -309,6 +426,27 @@ update msg model =
 
         NoOp ->
             ( model, Cmd.none )
+
+
+findCharacterAtSlot : Int -> GameState -> Maybe CharacterSheet
+findCharacterAtSlot slot gs =
+    List.filter (\c -> c.slot == slot) gs.characters |> List.head
+
+
+mapCharacterAtSlot : Int -> (CharacterSheet -> CharacterSheet) -> GameState -> GameState
+mapCharacterAtSlot slot f gs =
+    { gs
+        | characters =
+            List.map
+                (\c ->
+                    if c.slot == slot then
+                        f c
+
+                    else
+                        c
+                )
+                gs.characters
+    }
 
 
 
@@ -401,6 +539,79 @@ postStonesCmd flags maybeAuth path =
                 }
 
 
+postCharacterUpdateCmd : Flags -> Auth -> Int -> CharacterSheet -> Cmd Msg
+postCharacterUpdateCmd flags auth slot character =
+    let
+        url =
+            backendBaseUrl flags
+                ++ "/api/table/"
+                ++ flags.tableId
+                ++ "/characters/"
+                ++ String.fromInt slot
+                ++ "/update"
+                ++ "?sessionId="
+                ++ flags.tableId
+
+        body =
+            Encode.object
+                [ ( "name", Encode.string character.name )
+                , ( "notableFeatures", Encode.string character.notableFeatures )
+                , ( "archetype", Encode.string character.archetype )
+                , ( "desire", Encode.string character.desire )
+                , ( "quest", Encode.string character.quest )
+                , ( "condition", Encode.string character.condition )
+                , ( "notes", Encode.string character.notes )
+                ]
+    in
+    Http.request
+        { method = "POST"
+        , headers =
+            [ Http.header "Authorization" ("Bearer " ++ auth.sessionToken)
+            , Http.header "Content-Type" "application/json"
+            ]
+        , url = url
+        , body = Http.jsonBody body
+        , expect = Http.expectJson CharacterUpdated decodeGameState
+        , timeout = Nothing
+        , tracker = Nothing
+        }
+
+
+postFateCmd : Flags -> Maybe Auth -> Int -> Int -> Cmd Msg
+postFateCmd flags maybeAuth slot delta =
+    case maybeAuth of
+        Nothing ->
+            Cmd.none
+
+        Just auth ->
+            let
+                url =
+                    backendBaseUrl flags
+                        ++ "/api/table/"
+                        ++ flags.tableId
+                        ++ "/characters/"
+                        ++ String.fromInt slot
+                        ++ "/fate"
+                        ++ "?sessionId="
+                        ++ flags.tableId
+
+                body =
+                    Encode.object [ ( "delta", Encode.int delta ) ]
+            in
+            Http.request
+                { method = "POST"
+                , headers =
+                    [ Http.header "Authorization" ("Bearer " ++ auth.sessionToken)
+                    , Http.header "Content-Type" "application/json"
+                    ]
+                , url = url
+                , body = Http.jsonBody body
+                , expect = Http.expectJson CharacterUpdated decodeGameState
+                , timeout = Nothing
+                , tracker = Nothing
+                }
+
+
 
 -- VIEW
 
@@ -411,6 +622,7 @@ view model =
         [ h1 [] [ text "TTRPG Shared Board" ]
         , div [] [ text model.status ]
         , viewRollState model.gameState
+        , viewCharacterSheets model.gameState
         , viewMessages model
         , viewComposer model
         ]
@@ -453,6 +665,49 @@ viewRollState maybeGameState =
                             , button [ onClick AcceptRoll ] [ text "Accept" ]
                             ]
                 ]
+
+
+viewCharacterSheets : Maybe GameState -> Html Msg
+viewCharacterSheets maybeGameState =
+    case maybeGameState of
+        Nothing ->
+            div [ class "character-sheets" ] [ text "Loading character sheets..." ]
+
+        Just gs ->
+            div [ class "character-sheets" ]
+                (List.map viewCharacterSheet gs.characters)
+
+
+viewCharacterSheet : CharacterSheet -> Html Msg
+viewCharacterSheet character =
+    div [ class "character-sheet" ]
+        [ viewCharacterField character.slot NameField "Character Name" character.name
+        , viewCharacterField character.slot NotableFeaturesField "Notable Features" character.notableFeatures
+        , viewCharacterField character.slot ArchetypeField "Archetype" character.archetype
+        , viewCharacterField character.slot DesireField "Desire" character.desire
+        , viewCharacterField character.slot QuestField "Quest" character.quest
+        , viewCharacterField character.slot ConditionField "Condition" character.condition
+        , viewCharacterField character.slot NotesField "Notes" character.notes
+        , div [ class "fate" ]
+            [ text ("Fate: " ++ String.fromInt character.fate)
+            , button [ onClick (FateDecrement character.slot) ] [ text "-" ]
+            , button [ onClick (FateIncrement character.slot) ] [ text "+" ]
+            ]
+        ]
+
+
+viewCharacterField : Int -> CharacterField -> String -> String -> Html Msg
+viewCharacterField slot field label fieldValue =
+    div [ class "character-field" ]
+        [ text label
+        , input
+            [ type_ "text"
+            , value fieldValue
+            , onInput (CharacterFieldInput slot field)
+            , onBlur (CharacterFieldBlur slot)
+            ]
+            []
+        ]
 
 
 viewMessages : Model -> Html Msg

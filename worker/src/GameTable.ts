@@ -12,6 +12,9 @@ import type {
   PostMessageInput,
   Role,
   StoneKind,
+  CharacterSheet,
+  UpdateCharacterInput,
+  UpdateFateInput,
 } from "./types";
 
 const INITIAL_STONE_POOL: StoneKind[] = [
@@ -20,6 +23,8 @@ const INITIAL_STONE_POOL: StoneKind[] = [
   "WhiteStone",
   "BlackStone",
 ];
+
+const CHARACTER_SLOT_COUNT = 3;
 
 export class GameTable implements DurableObject {
   private state: DurableObjectState;
@@ -62,6 +67,16 @@ export class GameTable implements DurableObject {
 
     if (url.pathname === "/stones/accept" && request.method === "POST") {
       return this.handleAcceptRoll(request);
+    }
+
+    const charUpdateMatch = url.pathname.match(/^\/characters\/(\d+)\/update$/);
+    if (charUpdateMatch && request.method === "POST") {
+      return this.handleUpdateCharacter(request, Number(charUpdateMatch[1]));
+    }
+
+    const charFateMatch = url.pathname.match(/^\/characters\/(\d+)\/fate$/);
+    if (charFateMatch && request.method === "POST") {
+      return this.handleUpdateFate(request, Number(charFateMatch[1]));
     }
 
     if (
@@ -139,6 +154,7 @@ export class GameTable implements DurableObject {
       .all<Message>();
 
     const messages = rows.results ? [...rows.results].reverse() : [];
+    const characters = await this.loadOrCreateCharacters(sessionId);
 
     // The stone pool and pending roll are shared, in-memory session state:
     // not persisted to D1, they reset if the Durable Object restarts.
@@ -147,7 +163,56 @@ export class GameTable implements DurableObject {
       messages,
       stonePool: INITIAL_STONE_POOL,
       pendingRoll: null,
+      characters,
     };
+  }
+
+  private async loadOrCreateCharacters(
+    sessionId: string,
+  ): Promise<CharacterSheet[]> {
+    const rows = await this.env.DB.prepare(
+      `
+      SELECT id, slot, name, notable_features, archetype, desire, quest, condition, notes, fate
+      FROM characters
+      WHERE session_id = ?
+      ORDER BY slot
+    `,
+    )
+      .bind(sessionId)
+      .all<CharacterRow>();
+
+    const bySlot = new Map((rows.results ?? []).map((row) => [row.slot, row]));
+
+    for (let slot = 0; slot < CHARACTER_SLOT_COUNT; slot++) {
+      if (bySlot.has(slot)) continue;
+
+      const id = crypto.randomUUID();
+      await this.env.DB.prepare(
+        `
+        INSERT INTO characters (id, session_id, slot, updated_at)
+        VALUES (?, ?, ?, ?)
+      `,
+      )
+        .bind(id, sessionId, slot, Date.now())
+        .run();
+
+      bySlot.set(slot, {
+        id,
+        slot,
+        name: "",
+        notable_features: "",
+        archetype: "",
+        desire: "",
+        quest: "",
+        condition: "",
+        notes: "",
+        fate: 0,
+      });
+    }
+
+    return Array.from(bySlot.values())
+      .sort((a, b) => a.slot - b.slot)
+      .map(rowToCharacterSheet);
   }
 
   private async handleGetMessages(): Promise<Response> {
@@ -228,6 +293,97 @@ export class GameTable implements DurableObject {
       ...this.gameState!,
       stonePool: INITIAL_STONE_POOL,
       pendingRoll: null,
+    };
+    this.broadcast(this.gameState);
+
+    return jsonResponse(this.gameState);
+  }
+
+  private async handleUpdateCharacter(
+    request: Request,
+    slot: number,
+  ): Promise<Response> {
+    const authInfo = await getAuthFromRequest(this.env, request);
+    if (!authInfo) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+
+    const prev = this.gameState!;
+    const character = prev.characters.find((c) => c.slot === slot);
+    if (!character) {
+      return new Response("Not found", { status: 404 });
+    }
+
+    const input = (await request.json()) as UpdateCharacterInput;
+    const updated: CharacterSheet = {
+      ...character,
+      name: input.name ?? character.name,
+      notableFeatures: input.notableFeatures ?? character.notableFeatures,
+      archetype: input.archetype ?? character.archetype,
+      desire: input.desire ?? character.desire,
+      quest: input.quest ?? character.quest,
+      condition: input.condition ?? character.condition,
+      notes: input.notes ?? character.notes,
+    };
+
+    await this.env.DB.prepare(
+      `
+      UPDATE characters
+      SET name = ?, notable_features = ?, archetype = ?, desire = ?, quest = ?, condition = ?, notes = ?, updated_at = ?
+      WHERE id = ?
+    `,
+    )
+      .bind(
+        updated.name,
+        updated.notableFeatures,
+        updated.archetype,
+        updated.desire,
+        updated.quest,
+        updated.condition,
+        updated.notes,
+        Date.now(),
+        updated.id,
+      )
+      .run();
+
+    this.gameState = {
+      ...prev,
+      characters: prev.characters.map((c) => (c.slot === slot ? updated : c)),
+    };
+    this.broadcast(this.gameState);
+
+    return jsonResponse(this.gameState);
+  }
+
+  private async handleUpdateFate(
+    request: Request,
+    slot: number,
+  ): Promise<Response> {
+    const authInfo = await getAuthFromRequest(this.env, request);
+    if (!authInfo) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+
+    const prev = this.gameState!;
+    const character = prev.characters.find((c) => c.slot === slot);
+    if (!character) {
+      return new Response("Not found", { status: 404 });
+    }
+
+    const { delta } = (await request.json()) as UpdateFateInput;
+    const fate = Math.max(0, character.fate + delta);
+
+    await this.env.DB.prepare(
+      `UPDATE characters SET fate = ?, updated_at = ? WHERE id = ?`,
+    )
+      .bind(fate, Date.now(), character.id)
+      .run();
+
+    this.gameState = {
+      ...prev,
+      characters: prev.characters.map((c) =>
+        c.slot === slot ? { ...c, fate } : c,
+      ),
     };
     this.broadcast(this.gameState);
 
@@ -327,6 +483,34 @@ function randomInt(maxExclusive: number): number {
 
 function describeStones(stones: StoneKind[]): string {
   return stones.map((s) => (s === "WhiteStone" ? "White" : "Black")).join(", ");
+}
+
+type CharacterRow = {
+  id: string;
+  slot: number;
+  name: string;
+  notable_features: string;
+  archetype: string;
+  desire: string;
+  quest: string;
+  condition: string;
+  notes: string;
+  fate: number;
+};
+
+function rowToCharacterSheet(row: CharacterRow): CharacterSheet {
+  return {
+    id: row.id,
+    slot: row.slot,
+    name: row.name,
+    notableFeatures: row.notable_features,
+    archetype: row.archetype,
+    desire: row.desire,
+    quest: row.quest,
+    condition: row.condition,
+    notes: row.notes,
+    fate: row.fate,
+  };
 }
 
 type AuthInfo = {

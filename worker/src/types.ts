@@ -24,15 +24,37 @@ export type PendingRoll = {
   rest: StoneKind[];
 };
 
+export type CharacterSheet = {
+  id: string;
+  slot: number;
+  name: string;
+  notableFeatures: string;
+  archetype: string;
+  desire: string;
+  quest: string;
+  condition: string;
+  notes: string;
+  fate: number;
+};
+
+export type CharacterSheetFields = Omit<CharacterSheet, "id" | "slot" | "fate">;
+
 export type GameState = {
   sessionId: string;
   messages: Message[];
   stonePool: StoneKind[];
   pendingRoll: PendingRoll | null;
+  characters: CharacterSheet[];
 };
 
 export type PostMessageInput = {
   content: string;
+};
+
+export type UpdateCharacterInput = Partial<CharacterSheetFields>;
+
+export type UpdateFateInput = {
+  delta: number;
 };
 
 export type BackendAuthResult = {
