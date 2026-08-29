@@ -19,6 +19,10 @@ client/elm-stuff/
 # Worker build
 worker/dist/
 
+# Wrangler local dev state (D1/DO SQLite simulation, bundle cache)
+worker/.wrangler/
+.wrangler/
+
 # Env
 .env
 .env.local
