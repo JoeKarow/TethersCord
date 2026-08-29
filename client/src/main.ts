@@ -10,6 +10,7 @@ declare const Elm: {
       ports: {
         toDiscord: { subscribe: (handler: (message: unknown) => void) => void };
         fromDiscord: { send: (message: unknown) => void };
+        wsGameState: { send: (message: unknown) => void };
       };
     };
   };
@@ -46,7 +47,7 @@ async function main() {
     },
   });
 
-  await initDiscordBridge(discordSdk, app.ports, apiBaseUrl);
+  await initDiscordBridge(discordSdk, app.ports, apiBaseUrl, tableId);
 }
 
 main().catch((err) => {

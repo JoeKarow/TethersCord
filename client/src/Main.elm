@@ -99,7 +99,7 @@ type Msg
     | RerollStones
     | AcceptRoll
     | StonesUpdated (Result Http.Error GameState)
-    | PollTick
+    | WsGameStateRaw Decode.Value
     | NoOp
 
 
@@ -111,6 +111,9 @@ port toDiscord : Encode.Value -> Cmd msg
 
 
 port fromDiscord : (Decode.Value -> msg) -> Sub msg
+
+
+port wsGameState : (Decode.Value -> msg) -> Sub msg
 
 
 authorizeCmd : List String -> Cmd Msg
@@ -126,7 +129,7 @@ subscriptions : Model -> Sub Msg
 subscriptions _ =
     Sub.batch
         [ fromDiscord FromDiscordRaw
-        , Time.every 2000 (\_ -> PollTick)
+        , wsGameState WsGameStateRaw
         ]
 
 
@@ -296,12 +299,12 @@ update msg model =
         StonesUpdated (Err _) ->
             ( { model | status = "Failed to update stones." }, Cmd.none )
 
-        PollTick ->
-            case model.auth of
-                Just auth ->
-                    ( model, getGameStateCmd model.flags auth )
+        WsGameStateRaw value ->
+            case Decode.decodeValue decodeGameState value of
+                Ok gs ->
+                    ( { model | gameState = Just gs }, Cmd.none )
 
-                Nothing ->
+                Err _ ->
                     ( model, Cmd.none )
 
         NoOp ->

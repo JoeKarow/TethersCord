@@ -2,6 +2,7 @@
 
 import { DiscordSDK, type Types } from "@discord/embedded-app-sdk";
 import type { BackendAuthResult } from "../../worker/src/types";
+import { connectGameSocket } from "./GameSocket";
 
 type OAuthScopes = Types.OAuthScopes;
 
@@ -12,12 +13,16 @@ type ElmPorts = {
   fromDiscord: {
     send: (msg: any) => void;
   };
+  wsGameState: {
+    send: (msg: unknown) => void;
+  };
 };
 
 export async function initDiscordBridge(
   discordSdk: DiscordSDK,
   ports: ElmPorts,
   backendBaseUrl: string,
+  tableId: string,
 ): Promise<void> {
   ports.toDiscord.subscribe(async (msg: any) => {
     if (msg.type === "Authorize") {
@@ -31,6 +36,13 @@ export async function initDiscordBridge(
         const backendResult = await exchangeCodeWithBackend(
           backendBaseUrl,
           authCode,
+        );
+
+        connectGameSocket(
+          backendBaseUrl,
+          tableId,
+          backendResult.sessionToken,
+          ports,
         );
 
         ports.fromDiscord.send({

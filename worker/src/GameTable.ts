@@ -64,7 +64,65 @@ export class GameTable implements DurableObject {
       return this.handleAcceptRoll(request);
     }
 
+    if (
+      url.pathname === "/connect" &&
+      request.headers.get("Upgrade") === "websocket"
+    ) {
+      return this.handleConnect(request);
+    }
+
     return new Response("Not found", { status: 404 });
+  }
+
+  private async handleConnect(request: Request): Promise<Response> {
+    const token = parseTokenFromProtocol(
+      request.headers.get("Sec-WebSocket-Protocol"),
+    );
+    const authInfo = token ? await getAuthFromToken(this.env, token) : null;
+    if (!authInfo) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+
+    // Hibernatable: the DO can evict from memory between messages and still
+    // resume delivering broadcasts to this socket later.
+    this.state.acceptWebSocket(server);
+    server.send(JSON.stringify(this.gameState));
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+      headers: { "Sec-WebSocket-Protocol": "bearer" },
+    });
+  }
+
+  async webSocketMessage(): Promise<void> {
+    // Clients only receive broadcasts; no inbound messages are expected.
+  }
+
+  async webSocketClose(
+    ws: WebSocket,
+    code: number,
+    reason: string,
+  ): Promise<void> {
+    ws.close(code, reason);
+  }
+
+  async webSocketError(ws: WebSocket): Promise<void> {
+    ws.close(1011, "error");
+  }
+
+  private broadcast(state: GameState): void {
+    const payload = JSON.stringify(state);
+    for (const ws of this.state.getWebSockets()) {
+      try {
+        ws.send(payload);
+      } catch {
+        // Ignore sends to sockets that are closing; webSocketClose will clean up.
+      }
+    }
   }
 
   private async loadInitialState(sessionId: string): Promise<GameState> {
@@ -112,6 +170,7 @@ export class GameTable implements DurableObject {
     });
 
     this.gameState = next;
+    this.broadcast(next);
 
     return jsonResponse(next);
   }
@@ -126,6 +185,7 @@ export class GameTable implements DurableObject {
       ...this.gameState!,
       stonePool: [...this.gameState!.stonePool, "WhiteStone"],
     };
+    this.broadcast(this.gameState);
 
     return jsonResponse(this.gameState);
   }
@@ -153,6 +213,7 @@ export class GameTable implements DurableObject {
     );
 
     this.gameState = next;
+    this.broadcast(next);
 
     return jsonResponse(next);
   }
@@ -168,6 +229,7 @@ export class GameTable implements DurableObject {
       stonePool: INITIAL_STONE_POOL,
       pendingRoll: null,
     };
+    this.broadcast(this.gameState);
 
     return jsonResponse(this.gameState);
   }
@@ -273,6 +335,13 @@ type AuthInfo = {
   role: Role;
 };
 
+function parseTokenFromProtocol(header: string | null): string | null {
+  if (!header) return null;
+
+  const parts = header.split(",").map((part) => part.trim());
+  return parts.find((part) => part && part !== "bearer") ?? null;
+}
+
 async function getAuthFromRequest(
   env: Env,
   request: Request,
@@ -285,6 +354,13 @@ async function getAuthFromRequest(
   const token = authHeader.slice("Bearer ".length).trim();
   if (!token) return null;
 
+  return getAuthFromToken(env, token);
+}
+
+async function getAuthFromToken(
+  env: Env,
+  token: string,
+): Promise<AuthInfo | null> {
   const row = await env.DB.prepare(
     `
     SELECT s.discord_user_id, s.discord_username, dm.discord_user_id AS dm_id
