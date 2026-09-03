@@ -118,6 +118,10 @@ type alias Model =
     , gameState : Maybe GameState
     , newMessage : String
     , status : String
+
+    -- Slot the user is currently typing into, if any. Server pushes must not
+    -- overwrite a sheet while it is being edited.
+    , editingSlot : Maybe Int
     }
 
 
@@ -128,6 +132,7 @@ init flags =
       , gameState = Nothing
       , newMessage = ""
       , status = "Authorizing with Discord..."
+      , editingSlot = Nothing
       }
     , authorizeCmd [ "identify" ]
     )
@@ -155,6 +160,7 @@ type Msg
     | FateDecrement Int
     | CharacterUpdated (Result Http.Error GameState)
     | WsGameStateRaw Decode.Value
+    | AuthFailed String
     | NoOp
 
 
@@ -304,6 +310,10 @@ decodeFromDiscord =
                         Decode.map (Ok >> GotBackendAuth)
                             (Decode.field "data" decodeAuth)
 
+                    "AuthFailed" ->
+                        Decode.map AuthFailed
+                            (Decode.at [ "data", "message" ] Decode.string)
+
                     _ ->
                         Decode.succeed NoOp
             )
@@ -340,7 +350,7 @@ update msg model =
             ( { model | status = "Failed to authorize with backend." }, Cmd.none )
 
         GotGameState (Ok gs) ->
-            ( { model | gameState = Just gs, status = "Connected." }, Cmd.none )
+            ( { model | gameState = Just (applyServerState model gs), status = "Connected." }, Cmd.none )
 
         GotGameState (Err _) ->
             ( { model | status = "Failed to load game state." }, Cmd.none )
@@ -365,7 +375,7 @@ update msg model =
                     ( model, Cmd.none )
 
         MessagePosted (Ok gs) ->
-            ( { model | gameState = Just gs }, Cmd.none )
+            ( { model | gameState = Just (applyServerState model gs) }, Cmd.none )
 
         MessagePosted (Err _) ->
             ( { model | status = "Failed to post message." }, Cmd.none )
@@ -383,7 +393,7 @@ update msg model =
             ( model, postStonesCmd model.flags model.auth "/stones/accept" )
 
         StonesUpdated (Ok gs) ->
-            ( { model | gameState = Just gs }, Cmd.none )
+            ( { model | gameState = Just (applyServerState model gs) }, Cmd.none )
 
         StonesUpdated (Err _) ->
             ( { model | status = "Failed to update stones." }, Cmd.none )
@@ -392,17 +402,26 @@ update msg model =
             ( { model
                 | gameState =
                     Maybe.map (mapCharacterAtSlot slot (setCharacterField field value)) model.gameState
+                , editingSlot = Just slot
               }
             , Cmd.none
             )
 
         CharacterFieldBlur slot ->
+            let
+                released =
+                    if model.editingSlot == Just slot then
+                        { model | editingSlot = Nothing }
+
+                    else
+                        model
+            in
             case ( model.auth, model.gameState |> Maybe.andThen (findCharacterAtSlot slot) ) of
                 ( Just auth, Just character ) ->
-                    ( model, postCharacterUpdateCmd model.flags auth slot character )
+                    ( released, postCharacterUpdateCmd model.flags auth slot character )
 
                 _ ->
-                    ( model, Cmd.none )
+                    ( released, Cmd.none )
 
         FateIncrement slot ->
             ( model, postFateCmd model.flags model.auth slot 1 )
@@ -411,7 +430,7 @@ update msg model =
             ( model, postFateCmd model.flags model.auth slot -1 )
 
         CharacterUpdated (Ok gs) ->
-            ( { model | gameState = Just gs }, Cmd.none )
+            ( { model | gameState = Just (applyServerState model gs) }, Cmd.none )
 
         CharacterUpdated (Err _) ->
             ( { model | status = "Failed to update character sheet." }, Cmd.none )
@@ -419,13 +438,35 @@ update msg model =
         WsGameStateRaw value ->
             case Decode.decodeValue decodeGameState value of
                 Ok gs ->
-                    ( { model | gameState = Just gs }, Cmd.none )
+                    ( { model | gameState = Just (applyServerState model gs) }, Cmd.none )
 
                 Err _ ->
                     ( model, Cmd.none )
 
+        AuthFailed message ->
+            ( { model | status = "Discord authorization failed: " ++ message }, Cmd.none )
+
         NoOp ->
             ( model, Cmd.none )
+
+
+{-| Accept a server snapshot, but keep the character sheet the user is part-way
+through typing into. Broadcasts arrive on every table action, and replacing the
+whole state wholesale would wipe the field under the cursor.
+-}
+applyServerState : Model -> GameState -> GameState
+applyServerState model incoming =
+    case ( model.editingSlot, model.gameState ) of
+        ( Just slot, Just local ) ->
+            case findCharacterAtSlot slot local of
+                Just localCharacter ->
+                    mapCharacterAtSlot slot (\_ -> localCharacter) incoming
+
+                Nothing ->
+                    incoming
+
+        _ ->
+            incoming
 
 
 findCharacterAtSlot : Int -> GameState -> Maybe CharacterSheet
@@ -466,8 +507,6 @@ getGameStateCmd flags auth =
                 ++ "/api/table/"
                 ++ flags.tableId
                 ++ "/messages"
-                ++ "?sessionId="
-                ++ flags.tableId
     in
     Http.request
         { method = "GET"
@@ -489,8 +528,6 @@ postMessageCmd flags auth content =
                 ++ "/api/table/"
                 ++ flags.tableId
                 ++ "/message"
-                ++ "?sessionId="
-                ++ flags.tableId
 
         body =
             Encode.object
@@ -524,8 +561,6 @@ postStonesCmd flags maybeAuth path =
                         ++ "/api/table/"
                         ++ flags.tableId
                         ++ path
-                        ++ "?sessionId="
-                        ++ flags.tableId
             in
             Http.request
                 { method = "POST"
@@ -549,8 +584,6 @@ postCharacterUpdateCmd flags auth slot character =
                 ++ "/characters/"
                 ++ String.fromInt slot
                 ++ "/update"
-                ++ "?sessionId="
-                ++ flags.tableId
 
         body =
             Encode.object
@@ -592,8 +625,6 @@ postFateCmd flags maybeAuth slot delta =
                         ++ "/characters/"
                         ++ String.fromInt slot
                         ++ "/fate"
-                        ++ "?sessionId="
-                        ++ flags.tableId
 
                 body =
                     Encode.object [ ( "delta", Encode.int delta ) ]

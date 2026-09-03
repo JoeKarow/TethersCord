@@ -17,7 +17,7 @@ import type {
   UpdateFateInput,
 } from "./types";
 
-const INITIAL_STONE_POOL: StoneKind[] = [
+const INITIAL_STONE_POOL: readonly StoneKind[] = [
   "WhiteStone",
   "BlackStone",
   "WhiteStone",
@@ -26,10 +26,30 @@ const INITIAL_STONE_POOL: StoneKind[] = [
 
 const CHARACTER_SLOT_COUNT = 3;
 
+const MAX_MESSAGE_LENGTH = 2000;
+const MAX_FIELD_LENGTH = 500;
+const MAX_NOTES_LENGTH = 4000;
+
+/** Durable Object storage keys. */
+const KEY_SESSION_ID = "sessionId";
+const KEY_STONES = "stones";
+
+type StoneState = {
+  stonePool: StoneKind[];
+  pendingRoll: PendingRoll | null;
+};
+
 export class GameTable implements DurableObject {
   private state: DurableObjectState;
   private env: Env;
   private gameState: GameState | null = null;
+
+  /**
+   * Single-flighted initialization. A plain `if (!this.gameState)` check lets two
+   * concurrent cold requests both run the character bootstrap and collide on the
+   * `(session_id, slot)` unique index, so the promise is memoized instead.
+   */
+  private initPromise: Promise<GameState> | null = null;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -38,35 +58,52 @@ export class GameTable implements DurableObject {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const sessionId =
-      url.searchParams.get("sessionId") ?? this.state.id.toString();
 
-    if (!this.gameState) {
-      this.gameState = await this.loadInitialState(sessionId);
+    // `tableId` is stamped onto the URL by the Worker from the request path and
+    // overwrites anything the client sent, so it cannot be used to point this
+    // Durable Object at another table's rows.
+    const sessionId = url.searchParams.get("tableId");
+    if (!sessionId) {
+      return new Response("Missing table id", { status: 400 });
+    }
+
+    this.gameState = await this.ensureInitialized(sessionId);
+
+    if (url.pathname === "/connect") {
+      if (request.headers.get("Upgrade") !== "websocket") {
+        return new Response("Expected Upgrade: websocket", { status: 426 });
+      }
+      return this.handleConnect(request);
+    }
+
+    // Every route below this point requires a valid session.
+    const authInfo = await getAuthFromRequest(this.env, request);
+    if (!authInfo) {
+      return new Response("Unauthorized", { status: 401 });
     }
 
     if (url.pathname === "/messages" && request.method === "GET") {
-      return this.handleGetMessages();
+      return jsonResponse(this.gameState);
     }
 
     if (url.pathname === "/message" && request.method === "POST") {
-      return this.handlePostMessage(request);
+      return this.handlePostMessage(request, authInfo);
     }
 
     if (url.pathname === "/stones/add-white" && request.method === "POST") {
-      return this.handleAddWhiteStone(request);
+      return this.handleAddWhiteStone();
     }
 
     if (url.pathname === "/stones/roll" && request.method === "POST") {
-      return this.handleRoll(request, "Rolled");
+      return this.handleRoll(authInfo, "Rolled");
     }
 
     if (url.pathname === "/stones/reroll" && request.method === "POST") {
-      return this.handleRoll(request, "Rerolled");
+      return this.handleRoll(authInfo, "Rerolled");
     }
 
     if (url.pathname === "/stones/accept" && request.method === "POST") {
-      return this.handleAcceptRoll(request);
+      return this.handleAcceptRoll();
     }
 
     const charUpdateMatch = url.pathname.match(/^\/characters\/(\d+)\/update$/);
@@ -77,13 +114,6 @@ export class GameTable implements DurableObject {
     const charFateMatch = url.pathname.match(/^\/characters\/(\d+)\/fate$/);
     if (charFateMatch && request.method === "POST") {
       return this.handleUpdateFate(request, Number(charFateMatch[1]));
-    }
-
-    if (
-      url.pathname === "/connect" &&
-      request.headers.get("Upgrade") === "websocket"
-    ) {
-      return this.handleConnect(request);
     }
 
     return new Response("Not found", { status: 404 });
@@ -117,16 +147,19 @@ export class GameTable implements DurableObject {
     // Clients only receive broadcasts; no inbound messages are expected.
   }
 
-  async webSocketClose(
-    ws: WebSocket,
-    code: number,
-    reason: string,
-  ): Promise<void> {
-    ws.close(code, reason);
+  async webSocketClose(): Promise<void> {
+    // `web_socket_auto_reply_to_close` (on by default from compatibility date
+    // 2026-04-07) completes the closing handshake for us. Echoing the code back
+    // with `ws.close(code)` throws on 1005/1006, which the runtime synthesizes
+    // for every unclean disconnect.
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
-    ws.close(1011, "error");
+    try {
+      ws.close(1011, "error");
+    } catch {
+      // Already closed.
+    }
   }
 
   private broadcast(state: GameState): void {
@@ -140,10 +173,34 @@ export class GameTable implements DurableObject {
     }
   }
 
+  private ensureInitialized(sessionId: string): Promise<GameState> {
+    if (!this.initPromise) {
+      this.initPromise = this.loadInitialState(sessionId).catch((error) => {
+        // Let the next request retry rather than caching a rejected promise.
+        this.initPromise = null;
+        throw error;
+      });
+    }
+    return this.initPromise;
+  }
+
   private async loadInitialState(sessionId: string): Promise<GameState> {
+    // The first request to reach a fresh Durable Object fixes its session id.
+    // Later requests carrying a different one are a routing bug, not a rename.
+    const storedSessionId =
+      await this.state.storage.get<string>(KEY_SESSION_ID);
+    if (storedSessionId === undefined) {
+      await this.state.storage.put(KEY_SESSION_ID, sessionId);
+    } else if (storedSessionId !== sessionId) {
+      throw new Error(
+        `Durable Object is bound to session ${storedSessionId}, refusing ${sessionId}`,
+      );
+    }
+
     const rows = await this.env.DB.prepare(
       `
-      SELECT id, session_id, author_id, author_name, role, content, created_at
+      SELECT id, session_id AS sessionId, author_id AS authorId,
+             author_name AS authorName, role, content, created_at AS createdAt
       FROM messages
       WHERE session_id = ?
       ORDER BY created_at DESC
@@ -155,16 +212,42 @@ export class GameTable implements DurableObject {
 
     const messages = rows.results ? [...rows.results].reverse() : [];
     const characters = await this.loadOrCreateCharacters(sessionId);
+    const stones = await this.loadStoneState();
 
-    // The stone pool and pending roll are shared, in-memory session state:
-    // not persisted to D1, they reset if the Durable Object restarts.
     return {
       sessionId,
       messages,
-      stonePool: INITIAL_STONE_POOL,
-      pendingRoll: null,
+      stonePool: stones.stonePool,
+      pendingRoll: stones.pendingRoll,
       characters,
     };
+  }
+
+  /**
+   * The stone pool and pending roll are the only state this Durable Object
+   * genuinely owns, so they live in its own storage. Keeping them in memory
+   * loses them every time the DO hibernates, which is roughly ten seconds
+   * after a table goes quiet.
+   */
+  private async loadStoneState(): Promise<StoneState> {
+    const stored = await this.state.storage.get<StoneState>(KEY_STONES);
+    if (stored) {
+      return stored;
+    }
+
+    const initial: StoneState = {
+      stonePool: [...INITIAL_STONE_POOL],
+      pendingRoll: null,
+    };
+    await this.state.storage.put(KEY_STONES, initial);
+    return initial;
+  }
+
+  private async saveStoneState(state: GameState): Promise<void> {
+    await this.state.storage.put(KEY_STONES, {
+      stonePool: state.stonePool,
+      pendingRoll: state.pendingRoll,
+    } satisfies StoneState);
   }
 
   private async loadOrCreateCharacters(
@@ -215,87 +298,69 @@ export class GameTable implements DurableObject {
       .map(rowToCharacterSheet);
   }
 
-  private async handleGetMessages(): Promise<Response> {
-    return jsonResponse(this.gameState);
-  }
-
-  private async handlePostMessage(request: Request): Promise<Response> {
-    const authInfo = await getAuthFromRequest(this.env, request);
-    if (!authInfo) {
-      return new Response("Unauthorized", { status: 401 });
+  private async handlePostMessage(
+    request: Request,
+    authInfo: AuthInfo,
+  ): Promise<Response> {
+    const input = (await readJson(request)) as PostMessageInput | null;
+    const content = boundedString(input?.content, MAX_MESSAGE_LENGTH);
+    if (!content.trim()) {
+      return new Response("Message content is required", { status: 400 });
     }
 
-    const inputRaw = (await request.json()) as PostMessageInput;
-
-    const next = await this.appendMessage(this.gameState!, {
+    await this.appendMessage({
       authorId: authInfo.discordUserId,
       authorName: authInfo.username,
       role: authInfo.role,
-      content: inputRaw.content,
+      content,
     });
 
-    this.gameState = next;
-    this.broadcast(next);
-
-    return jsonResponse(next);
+    this.broadcast(this.gameState!);
+    return jsonResponse(this.gameState);
   }
 
-  private async handleAddWhiteStone(request: Request): Promise<Response> {
-    const authInfo = await getAuthFromRequest(this.env, request);
-    if (!authInfo) {
-      return new Response("Unauthorized", { status: 401 });
-    }
-
+  private async handleAddWhiteStone(): Promise<Response> {
+    // Read `this.gameState` fresh rather than from a snapshot taken before an
+    // await, so concurrent requests cannot clobber each other's writes.
     this.gameState = {
       ...this.gameState!,
       stonePool: [...this.gameState!.stonePool, "WhiteStone"],
     };
-    this.broadcast(this.gameState);
+    await this.saveStoneState(this.gameState);
 
+    this.broadcast(this.gameState);
     return jsonResponse(this.gameState);
   }
 
   private async handleRoll(
-    request: Request,
+    authInfo: AuthInfo,
     verb: "Rolled" | "Rerolled",
   ): Promise<Response> {
-    const authInfo = await getAuthFromRequest(this.env, request);
-    if (!authInfo) {
-      return new Response("Unauthorized", { status: 401 });
-    }
+    const pendingRoll = pickTwoRandom(this.gameState!.stonePool);
 
-    const prev = this.gameState!;
-    const pendingRoll = pickTwoRandom(prev.stonePool);
+    this.gameState = { ...this.gameState!, pendingRoll };
+    await this.saveStoneState(this.gameState);
 
-    const next = await this.appendMessage(
-      { ...prev, pendingRoll },
-      {
-        authorId: authInfo.discordUserId,
-        authorName: authInfo.username,
-        role: authInfo.role,
-        content: `${verb}: ${describeStones(pendingRoll.chosen)}`,
-      },
-    );
+    await this.appendMessage({
+      authorId: authInfo.discordUserId,
+      authorName: authInfo.username,
+      role: authInfo.role,
+      content: `${verb}: ${describeStones(pendingRoll.chosen)}`,
+    });
 
-    this.gameState = next;
-    this.broadcast(next);
-
-    return jsonResponse(next);
+    this.broadcast(this.gameState!);
+    return jsonResponse(this.gameState);
   }
 
-  private async handleAcceptRoll(request: Request): Promise<Response> {
-    const authInfo = await getAuthFromRequest(this.env, request);
-    if (!authInfo) {
-      return new Response("Unauthorized", { status: 401 });
-    }
-
+  private async handleAcceptRoll(): Promise<Response> {
     this.gameState = {
       ...this.gameState!,
-      stonePool: INITIAL_STONE_POOL,
+      stonePool: [...INITIAL_STONE_POOL],
       pendingRoll: null,
     };
-    this.broadcast(this.gameState);
+    await this.saveStoneState(this.gameState);
 
+    this.broadcast(this.gameState);
     return jsonResponse(this.gameState);
   }
 
@@ -303,27 +368,28 @@ export class GameTable implements DurableObject {
     request: Request,
     slot: number,
   ): Promise<Response> {
-    const authInfo = await getAuthFromRequest(this.env, request);
-    if (!authInfo) {
-      return new Response("Unauthorized", { status: 401 });
+    const input = (await readJson(request)) as UpdateCharacterInput | null;
+    if (!input) {
+      return new Response("Invalid body", { status: 400 });
     }
 
-    const prev = this.gameState!;
-    const character = prev.characters.find((c) => c.slot === slot);
+    const character = this.gameState!.characters.find((c) => c.slot === slot);
     if (!character) {
       return new Response("Not found", { status: 404 });
     }
 
-    const input = (await request.json()) as UpdateCharacterInput;
     const updated: CharacterSheet = {
       ...character,
-      name: input.name ?? character.name,
-      notableFeatures: input.notableFeatures ?? character.notableFeatures,
-      archetype: input.archetype ?? character.archetype,
-      desire: input.desire ?? character.desire,
-      quest: input.quest ?? character.quest,
-      condition: input.condition ?? character.condition,
-      notes: input.notes ?? character.notes,
+      name: boundedField(input.name, character.name),
+      notableFeatures: boundedField(
+        input.notableFeatures,
+        character.notableFeatures,
+      ),
+      archetype: boundedField(input.archetype, character.archetype),
+      desire: boundedField(input.desire, character.desire),
+      quest: boundedField(input.quest, character.quest),
+      condition: boundedField(input.condition, character.condition),
+      notes: boundedField(input.notes, character.notes, MAX_NOTES_LENGTH),
     };
 
     await this.env.DB.prepare(
@@ -347,11 +413,13 @@ export class GameTable implements DurableObject {
       .run();
 
     this.gameState = {
-      ...prev,
-      characters: prev.characters.map((c) => (c.slot === slot ? updated : c)),
+      ...this.gameState!,
+      characters: this.gameState!.characters.map((c) =>
+        c.slot === slot ? updated : c,
+      ),
     };
-    this.broadcast(this.gameState);
 
+    this.broadcast(this.gameState);
     return jsonResponse(this.gameState);
   }
 
@@ -359,18 +427,17 @@ export class GameTable implements DurableObject {
     request: Request,
     slot: number,
   ): Promise<Response> {
-    const authInfo = await getAuthFromRequest(this.env, request);
-    if (!authInfo) {
-      return new Response("Unauthorized", { status: 401 });
+    const input = (await readJson(request)) as UpdateFateInput | null;
+    const delta = input?.delta;
+    if (typeof delta !== "number" || !Number.isInteger(delta)) {
+      return new Response("delta must be an integer", { status: 400 });
     }
 
-    const prev = this.gameState!;
-    const character = prev.characters.find((c) => c.slot === slot);
+    const character = this.gameState!.characters.find((c) => c.slot === slot);
     if (!character) {
       return new Response("Not found", { status: 404 });
     }
 
-    const { delta } = (await request.json()) as UpdateFateInput;
     const fate = Math.max(0, character.fate + delta);
 
     await this.env.DB.prepare(
@@ -380,22 +447,27 @@ export class GameTable implements DurableObject {
       .run();
 
     this.gameState = {
-      ...prev,
-      characters: prev.characters.map((c) =>
+      ...this.gameState!,
+      characters: this.gameState!.characters.map((c) =>
         c.slot === slot ? { ...c, fate } : c,
       ),
     };
-    this.broadcast(this.gameState);
 
+    this.broadcast(this.gameState);
     return jsonResponse(this.gameState);
   }
 
-  private async appendMessage(
-    state: GameState,
-    input: AddMessageInput,
-  ): Promise<GameState> {
-    const next = addMessage(state, input);
-    const msg = next.messages[next.messages.length - 1];
+  /** Persists the message, then folds it into the current in-memory state. */
+  private async appendMessage(input: AddMessageInput): Promise<void> {
+    const msg: Message = {
+      id: crypto.randomUUID(),
+      sessionId: this.gameState!.sessionId,
+      authorId: input.authorId,
+      authorName: input.authorName,
+      role: input.role,
+      content: input.content,
+      createdAt: Date.now(),
+    };
 
     await this.env.DB.prepare(
       `
@@ -414,7 +486,10 @@ export class GameTable implements DurableObject {
       )
       .run();
 
-    return next;
+    this.gameState = {
+      ...this.gameState!,
+      messages: capMessages([...this.gameState!.messages, msg]),
+    };
   }
 }
 
@@ -425,31 +500,33 @@ type AddMessageInput = {
   content: string;
 };
 
-function addMessage(state: GameState, input: AddMessageInput): GameState {
-  const now = Date.now();
-  const id = crypto.randomUUID();
+const MAX_MESSAGES = 200;
 
-  const msg: Message = {
-    id,
-    sessionId: state.sessionId,
-    authorId: input.authorId,
-    authorName: input.authorName,
-    role: input.role,
-    content: input.content,
-    createdAt: now,
-  };
+function capMessages(messages: Message[]): Message[] {
+  return messages.length > MAX_MESSAGES
+    ? messages.slice(messages.length - MAX_MESSAGES)
+    : messages;
+}
 
-  const maxMessages = 200;
+async function readJson(request: Request): Promise<unknown> {
+  try {
+    const parsed = await request.json();
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
 
-  const cappedMessages =
-    state.messages.length >= maxMessages
-      ? [
-          ...state.messages.slice(state.messages.length - (maxMessages - 1)),
-          msg,
-        ]
-      : [...state.messages, msg];
+function boundedString(value: unknown, max: number): string {
+  return typeof value === "string" ? value.slice(0, max) : "";
+}
 
-  return { ...state, messages: cappedMessages };
+function boundedField(
+  value: unknown,
+  fallback: string,
+  max: number = MAX_FIELD_LENGTH,
+): string {
+  return typeof value === "string" ? value.slice(0, max) : fallback;
 }
 
 function pickTwoRandom(pool: StoneKind[]): PendingRoll {
@@ -475,9 +552,15 @@ function pickTwoRandom(pool: StoneKind[]): PendingRoll {
   return { chosen, rest };
 }
 
+/** Rejection sampling, so the low indices are not favoured by modulo bias. */
 function randomInt(maxExclusive: number): number {
+  const limit = Math.floor(0x100000000 / maxExclusive) * maxExclusive;
   const buf = new Uint32Array(1);
-  crypto.getRandomValues(buf);
+
+  do {
+    crypto.getRandomValues(buf);
+  } while (buf[0] >= limit);
+
   return buf[0] % maxExclusive;
 }
 
@@ -550,11 +633,11 @@ async function getAuthFromToken(
     SELECT s.discord_user_id, s.discord_username, dm.discord_user_id AS dm_id
     FROM sessions_auth s
     LEFT JOIN facilitators dm ON dm.discord_user_id = s.discord_user_id
-    WHERE s.session_token = ?
+    WHERE s.session_token = ? AND s.expires_at > ?
     LIMIT 1
   `,
   )
-    .bind(token)
+    .bind(token, Date.now())
     .first<{
       discord_user_id: string;
       discord_username: string;
@@ -575,7 +658,7 @@ async function getAuthFromToken(
 function jsonResponse(data: unknown, init?: ResponseInit): Response {
   return new Response(JSON.stringify(data), {
     status: 200,
-    headers: { "Content-Type": "application/json" },
     ...init,
+    headers: { "Content-Type": "application/json", ...init?.headers },
   });
 }
