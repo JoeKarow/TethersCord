@@ -25,14 +25,37 @@ function getQueryParams(): Record<string, string> {
   return result;
 }
 
+/**
+ * A table has to outlive a single launch of the Activity. Discord mints a fresh
+ * `instance_id` every time the Activity is opened, so keying on it gives every
+ * session a brand new Durable Object and three blank character sheets. The
+ * channel is the stable thing a group comes back to.
+ */
+function resolveTableId(
+  discordSdk: DiscordSDK,
+  queryParams: Record<string, string>,
+): string {
+  const channelId = discordSdk.channelId ?? queryParams["channel_id"];
+  if (channelId) {
+    const guildId = discordSdk.guildId ?? queryParams["guild_id"];
+    return guildId ? `${guildId}-${channelId}` : channelId;
+  }
+
+  // Outside a Discord channel (a DM, or a plain browser tab) fall back to the
+  // launch instance so at least one session hangs together.
+  return queryParams["instance_id"] ?? "default-table";
+}
+
 async function main() {
   const discordSdk = new DiscordSDK((window as any).DISCORD_CLIENT_ID);
   await discordSdk.ready();
 
   const queryParams = getQueryParams();
 
-  const apiBaseUrl = (window as any).BACKEND_BASE_URL ?? window.location.origin;
-  const tableId = queryParams["instance_id"] ?? "default-table";
+  // `||` not `??`: BACKEND_BASE_URL is injected as "", which is not nullish, so
+  // `??` would never reach the fallback.
+  const apiBaseUrl = (window as any).BACKEND_BASE_URL || window.location.origin;
+  const tableId = resolveTableId(discordSdk, queryParams);
   const root = document.getElementById("root");
 
   if (!root) {

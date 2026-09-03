@@ -1,6 +1,6 @@
 name = "tetherscord"
 main = "src/index.ts"
-compatibility_date = "2026-01-01"
+compatibility_date = "2026-09-01"
 
 # Deploying the Worker separately from Pages.
 
@@ -10,7 +10,6 @@ invocation_logs = true
 
 
 [vars]
-DISCORD_REDIRECT_URI = "https://tetherscord.tkshillinz.workers.dev/api/oauth/discord/exchange"
 DISCORD_CLIENT_ID = "1540421919982231692"
 
 # DISCORD_CLIENT_SECRET should be set via wrangler secrets, not plain vars.
@@ -19,7 +18,7 @@ DISCORD_CLIENT_ID = "1540421919982231692"
 binding = "DB"
 database_name = "ttrpg-activity-db"
 database_id = "8cef44a0-b184-45b2-af0b-820d803b2fc0"
-migrations_dir = "./migratons"
+migrations_dir = "./migrations"
 
 [[durable_objects.bindings]]
 name = "GAME_TABLE"
@@ -29,5 +28,6 @@ class_name = "GameTable"
 type = "durable-object"
 storage = "sqlite"
 
-[build]
-command = "npm run build" # or "npx esbuild src/index.ts --bundle --outfile=dist/index.js"
+# Prunes expired rows from sessions_auth once an hour.
+[triggers]
+crons = ["0 * * * *"]

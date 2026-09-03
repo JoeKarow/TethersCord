@@ -62,6 +62,10 @@ export type BackendAuthResult = {
   username: string;
   role: Role;
   sessionToken: string;
+  /** Epoch millis at which `sessionToken` stops being accepted. */
+  expiresAt: number;
+  /** Discord access token, for `discordSdk.commands.authenticate`. */
+  accessToken: string;
 };
 
 export type Env = {
@@ -69,5 +73,4 @@ export type Env = {
   GAME_TABLE: DurableObjectNamespace;
   DISCORD_CLIENT_ID: string;
   DISCORD_CLIENT_SECRET: string;
-  DISCORD_REDIRECT_URI: string;
 };

@@ -2,7 +2,7 @@
 
 import { DiscordSDK, type Types } from "@discord/embedded-app-sdk";
 import type { BackendAuthResult } from "../../worker/src/types";
-import { connectGameSocket } from "./GameSocket";
+import { connectGameSocket, type GameSocketHandle } from "./GameSocket";
 
 type OAuthScopes = Types.OAuthScopes;
 
@@ -24,6 +24,10 @@ export async function initDiscordBridge(
   backendBaseUrl: string,
   tableId: string,
 ): Promise<void> {
+  // Re-authorizing must not leave the previous socket (and its reconnect loop)
+  // running in the background.
+  let socket: GameSocketHandle | null = null;
+
   ports.toDiscord.subscribe(async (msg: any) => {
     if (msg.type === "Authorize") {
       // Elm sends strings, we trust they are valid scopes and cast:
@@ -38,7 +42,15 @@ export async function initDiscordBridge(
           authCode,
         );
 
-        connectGameSocket(
+        // Completes the Activity handshake. Without this the SDK stays
+        // unauthenticated and every privileged command (setActivity,
+        // getChannel, participant subscriptions) fails.
+        await discordSdk.commands.authenticate({
+          access_token: backendResult.accessToken,
+        });
+
+        socket?.close();
+        socket = connectGameSocket(
           backendBaseUrl,
           tableId,
           backendResult.sessionToken,
@@ -51,9 +63,17 @@ export async function initDiscordBridge(
         });
       } catch (error) {
         console.error("Authorize flow failed", error);
+        ports.fromDiscord.send({
+          type: "AuthFailed",
+          data: { message: describeError(error) },
+        });
       }
     }
   });
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function apiUrl(backendBaseUrl: string, path: string): string {
@@ -71,6 +91,7 @@ async function runDiscordAuthorize(
   const response = await discordSdk.commands.authorize({
     client_id: (window as any).DISCORD_CLIENT_ID,
     response_type: "code",
+    state: "",
     scope: scopes,
     prompt: "none",
   });
