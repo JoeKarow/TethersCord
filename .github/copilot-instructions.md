@@ -2,10 +2,16 @@
 
 ## Project layout
 
-- `client/` is an Elm 0.19 application built with Vite.
+- The whole app deploys as a single Cloudflare Worker configured by the root
+  `wrangler.jsonc`. `/api/*` is the only route that reaches Worker code; every
+  other path is served from `client/dist` as a static asset, with `index.html`
+  fallback for client routing.
+- `client/` is an Elm 0.19 application built with esbuild via
+  `client/scripts/build.mjs`.
 - `worker/` is a TypeScript Cloudflare Worker using Wrangler.
 - Keep client and worker responsibilities separate.
 - Prefer existing project patterns and minimal, focused changes.
+- Use pnpm; all scripts live in the root `package.json`.
 - Goal is to make a Discord Application to run my custom TTRPG with my friends. The application will be used to manage the game, including character sheets, dice rolls, and other game mechanics.
 
 ## Elm
@@ -13,16 +19,17 @@
 - Use idiomatic Elm architecture: model, message, update, view.
 - Avoid JavaScript interop unless required; keep ports narrow and typed.
 - Run client checks after Elm changes:
-  - `cd client && npm run build`
+  - `pnpm run build:client`
   - Run Elm tests when present.
 
 ## Worker
 
 - Keep request validation and authorization explicit.
 - Preserve TypeScript strictness and Cloudflare Worker compatibility.
-- Run `cd worker && npm run build` after Worker changes.
-- Use `cd worker && npx wrangler dev` for local runtime verification.
-- Only run `npm run deploy` when explicitly asked.
+- Run `pnpm run typecheck:worker` after Worker changes.
+- Use `pnpm run dev` for local runtime verification: it starts the client
+  watcher plus `wrangler dev` on port 8787.
+- Only run `pnpm run deploy` when explicitly asked.
 
 ## General
 
