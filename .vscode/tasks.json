@@ -16,7 +16,7 @@
     {
       "label": "Dev: Client",
       "type": "npm",
-      "script": "dev:client",
+      "script": "watch:client",
       "isBackground": true,
       "presentation": {
         "reveal": "always",
@@ -26,8 +26,8 @@
     },
     {
       "label": "Dev: Worker",
-      "type": "npm",
-      "script": "dev:worker",
+      "type": "shell",
+      "command": "pnpm exec wrangler dev",
       "isBackground": true,
       "presentation": {
         "reveal": "always",
@@ -62,9 +62,9 @@
       "problemMatcher": []
     },
     {
-      "label": "Build: Worker",
+      "label": "Typecheck",
       "type": "npm",
-      "script": "build:worker",
+      "script": "typecheck",
       "presentation": {
         "reveal": "always",
         "panel": "shared",
@@ -73,7 +73,7 @@
       "problemMatcher": []
     },
     {
-      "label": "Deploy: Worker",
+      "label": "Deploy",
       "type": "npm",
       "script": "deploy",
       "presentation": {

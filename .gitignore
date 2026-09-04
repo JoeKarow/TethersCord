@@ -7,24 +7,15 @@ build/
 .cache/
 .tmp/
 
-# Vite
-client/.vite/
-
 # Elm
 client/elm-stuff/
 
-# Worker build
-worker/dist/
-
 # Wrangler local dev state (D1/DO SQLite simulation, bundle cache)
-worker/.wrangler/
 .wrangler/
 
 # Env
 .env
 .env.local
 .env.*.local
-worker/.dev.vars
-worker/.env
-worker/.env.*
-!worker/.dev.vars.example
+.dev.vars
+!.dev.vars.example

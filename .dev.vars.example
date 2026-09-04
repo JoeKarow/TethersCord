@@ -1,3 +1,3 @@
-# Copy to worker/.dev.vars for `wrangler dev`.
+# Copy to `.dev.vars` (this file's directory, next to wrangler.jsonc) for `wrangler dev`.
 # In production set the secret with: wrangler secret put DISCORD_CLIENT_SECRET
 DISCORD_CLIENT_SECRET=replace-with-your-discord-client-secret

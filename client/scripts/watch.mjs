@@ -22,24 +22,19 @@ function runBuild() {
 }
 
 await runBuild();
-const server = spawn(process.execPath, [resolve(scriptsDir, "serve.mjs")], {
-  cwd: clientDir,
-  stdio: "inherit",
-});
 
+// `wrangler dev` reads client/dist off disk, so rebuilding in place is all the
+// watcher has to do -- there is no dev server of our own to reload.
 let timer;
-watch(resolve(clientDir, "src"), { recursive: true }, () => {
+function scheduleBuild() {
   clearTimeout(timer);
   timer = setTimeout(
     () => runBuild().catch((error) => console.error(error)),
     150,
   );
-});
-
-function stop() {
-  server.kill();
-  process.exit(0);
 }
 
-process.on("SIGINT", stop);
-process.on("SIGTERM", stop);
+watch(resolve(clientDir, "src"), { recursive: true }, scheduleBuild);
+watch(resolve(clientDir, "index.html"), scheduleBuild);
+
+console.log("Watching client/src and client/index.html");
