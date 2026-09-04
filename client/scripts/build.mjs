@@ -1,17 +1,28 @@
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { cp, mkdir, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const clientDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = resolve(clientDir, "..");
 const distDir = resolve(clientDir, "dist");
+
+// Go to the package, not node_modules/.bin. The elm package ships bin/elm as a
+// JS placeholder and swaps in a native binary during its install script, so
+// pnpm's shim -- written from the placeholder -- tries to run the binary through
+// `node` and dies. The package path is correct under both pnpm and npm, and it
+// also makes `node client/scripts/build.mjs` work outside a package script,
+// where node_modules/.bin is not on PATH.
+const localElm = resolve(repoRoot, "node_modules/elm/bin/elm");
+const elm = existsSync(localElm) ? localElm : "elm";
 
 await rm(distDir, { recursive: true, force: true });
 await mkdir(distDir, { recursive: true });
 
 execFileSync(
-  "elm",
+  elm,
   ["make", "src/Main.elm", "--optimize", "--output", "dist/elm.js"],
   {
     cwd: clientDir,
