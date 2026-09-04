@@ -51,9 +51,27 @@ export class GameTable implements DurableObject {
    */
   private initPromise: Promise<GameState> | null = null;
 
+  /**
+   * Durable Objects interleave concurrent requests at `await` points, so two
+   * mutating requests can both read `gameState` before either has written its
+   * result back, and the second write clobbers the first (lost update). This
+   * chain forces every mutation to run to completion — DB write, in-memory
+   * update, and broadcast — before the next one starts.
+   */
+  private mutationLock: Promise<unknown> = Promise.resolve();
+
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
     this.env = env;
+  }
+
+  private withLock<T>(fn: () => Promise<T>): Promise<T> {
+    const result = this.mutationLock.then(fn, fn);
+    this.mutationLock = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -87,33 +105,37 @@ export class GameTable implements DurableObject {
     }
 
     if (url.pathname === "/message" && request.method === "POST") {
-      return this.handlePostMessage(request, authInfo);
+      return this.withLock(() => this.handlePostMessage(request, authInfo));
     }
 
     if (url.pathname === "/stones/add-white" && request.method === "POST") {
-      return this.handleAddWhiteStone();
+      return this.withLock(() => this.handleAddWhiteStone());
     }
 
     if (url.pathname === "/stones/roll" && request.method === "POST") {
-      return this.handleRoll(authInfo, "Rolled");
+      return this.withLock(() => this.handleRoll(authInfo, "Rolled"));
     }
 
     if (url.pathname === "/stones/reroll" && request.method === "POST") {
-      return this.handleRoll(authInfo, "Rerolled");
+      return this.withLock(() => this.handleRoll(authInfo, "Rerolled"));
     }
 
     if (url.pathname === "/stones/accept" && request.method === "POST") {
-      return this.handleAcceptRoll();
+      return this.withLock(() => this.handleAcceptRoll());
     }
 
     const charUpdateMatch = url.pathname.match(/^\/characters\/(\d+)\/update$/);
     if (charUpdateMatch && request.method === "POST") {
-      return this.handleUpdateCharacter(request, Number(charUpdateMatch[1]));
+      return this.withLock(() =>
+        this.handleUpdateCharacter(request, Number(charUpdateMatch[1])),
+      );
     }
 
     const charFateMatch = url.pathname.match(/^\/characters\/(\d+)\/fate$/);
     if (charFateMatch && request.method === "POST") {
-      return this.handleUpdateFate(request, Number(charFateMatch[1]));
+      return this.withLock(() =>
+        this.handleUpdateFate(request, Number(charFateMatch[1])),
+      );
     }
 
     return new Response("Not found", { status: 404 });
